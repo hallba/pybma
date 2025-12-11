@@ -48,7 +48,10 @@ def loadModel(name):
     #from a filename, return a BMA model object
     with open(name, "r") as f:
         data = json.load(f)
-        print("✓ JSON available!")
+    print("✓ JSON available!")
+    return(data)
+
+def processModel(data):
     #load data into model object
     model = Model()
     modelData = data['Model']
@@ -85,7 +88,34 @@ def loadModel(name):
     args = System.Array[System.Object]([model])
     result = qn_of_model.Invoke(None, args)
 
-    return(data,result)
+    print("✓ Model converted!")
+    return(result)
+
+def stability(qn):
+    stabilize = assembly.GetType('Stabilize')
+    sp = stabilize.GetMethod("stabilization_prover")
+
+    Concurrency = assembly.GetType("Counterexample+concurrency")
+    sync = Concurrency.GetProperty("Synchronous").GetValue(None)
+
+    args = System.Array[System.Object]([qn, False, sync])
+    result = sp.Invoke(None, args)
+    print("✓ Proof performed!")
+    return(result)
+
+#load model from json into a qn
+model= loadModel(MODEL)
+qn = processModel(model)
+#stability analysis
+proof = stability(qn)
+#show the result
+print(proof)
+print("Repeat with a knockout")
+#knock out a variable
+model['Model']['Variables'][0]['Formula'] = "0"
+qn = processModel(model)
+proof = stability(qn)
+print(proof)
 
 '''
 # Find the marshal type

@@ -107,7 +107,7 @@ def unpackCex(result):
         sim = (_fsharp_map_to_python(cex.Item1),_fsharp_map_to_python(cex.Item2))
     else:
         sim = None
-    return(t,sim)
+    return({"Result":t,"Example":sim)
         
 def unpackResult(proofResult):
     progression = unpackProof(proofResult.Item1)

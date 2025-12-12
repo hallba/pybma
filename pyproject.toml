@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pybma"
+version = "0.1.0"
+description = "Python wrapper for BioModelAnalyzer .NET library"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "pythonnet>=3.0.0",
+    "clr-loader>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=22.0.0",
+    "flake8>=5.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/pybma"
+Repository = "https://github.com/yourusername/pybma"
+Documentation = "https://github.com/yourusername/pybma#readme"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pybma*"]
+
+[tool.setuptools.package-data]
+pybma = ["assemblies/*.dll", "assemblies/*.so", "assemblies/*.dylib"]
+

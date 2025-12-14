@@ -101,6 +101,9 @@ def simulate(qn,steps=10,initial_values=None):
     if initial_values == None:
         for var in variables:
             t0[var] = System.Int32(int(0))
+    else:
+        for var in initial_values.keys():
+            t0[var] = System.Int32(initial_values[var])
     
     t0 = python_dict_to_fsharp_map(t0)
 

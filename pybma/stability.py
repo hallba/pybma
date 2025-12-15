@@ -107,12 +107,12 @@ def unpackCex(result):
         sim = (_fsharp_map_to_python(cex.Item1),_fsharp_map_to_python(cex.Item2))
     else:
         sim = None
-    return({"Result":t,"Example":sim)
+    return({"Result":t,"Example":sim})
         
 def unpackResult(proofResult):
     progression = unpackProof(proofResult.Item1)
     cex = unpackCex(proofResult.Item2)
-    return(progression,cex)
+    return({"ProofProgression":progression,"CounterExample":cex})
 
 def check_stability(qn, synchronous=True):
     """

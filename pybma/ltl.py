@@ -126,7 +126,6 @@ def testQuery(query, qn, length_of_path):
                 ntrace[int(item.Key)].append(item.Value)
             else:
                 ntrace[int(item.Key)] = [item.Value]
-    print(ltl_formula)
     result = {"LTL":query, "query":res1,"posTrace":ptrace,"negation":res2,"negTrace":ntrace}
     
     return result

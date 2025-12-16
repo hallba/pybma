@@ -82,6 +82,13 @@ def _double_bounded_mc_with_sim(ltl_formula, qn, correct_length_paths, polarity)
 
 def testQuery(query, qn, length_of_path):
     ltl_formula = _string_to_LTL_formula(query,qn)
+    
+    if str(ltl_formula) == "Error":
+        print("Malformed LTL query: " + query)
+        print("Check paranetheses and capitalisation- for examples and keywords see:")
+        print("https://github.com/hallba/BioModelAnalyzer/blob/master/BmaLinux/BioCheckAnalyzerMulti/LTL.fs")
+        return {}
+    
     nuRangel = _nuRangel( qn)
     paths = _output_paths( qn, nuRangel)
     correct_length_paths = _change_list_to_length(paths, System.Int32(length_of_path))
@@ -115,7 +122,7 @@ def testQuery(query, qn, length_of_path):
     for x in maxRange(model2):
         t = model2[x]
         for item in t:
-            if int(item.Key) in ptrace:
+            if int(item.Key) in ntrace:
                 ntrace[int(item.Key)].append(item.Value)
             else:
                 ntrace[int(item.Key)] = [item.Value]

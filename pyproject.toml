@@ -32,9 +32,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/pybma"
-Repository = "https://github.com/yourusername/pybma"
-Documentation = "https://github.com/yourusername/pybma#readme"
+Homepage = "https://github.com/hallba/pybma"
+Repository = "https://github.com/hallba/pybma"
+Documentation = "https://github.com/hallba/pybma#readme"
 
 [tool.setuptools.packages.find]
 where = ["."]

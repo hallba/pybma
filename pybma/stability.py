@@ -5,6 +5,7 @@ Stability analysis functions
 import System
 from pathlib import Path
 from .core import _assembly
+from .utilities import bmaTrace_to_dict
 
 def _fsharp_list_to_python(fsharp_list):
     """Convert F# list to Python list"""
@@ -98,13 +99,13 @@ def unpackCex(result):
     cex = result.Value
     t = cex.GetType().FullName.split("+")[-1]
     if t == "CExCycle":
-        sim = _fsharp_map_to_python(cex.Item)
+        sim = bmaTrace_to_dict(_fsharp_map_to_python(cex.Item))
     elif t == "CExFixpoint":
-        sim = _fsharp_map_to_python(cex.Item)
+        sim = bmaTrace_to_dict(_fsharp_map_to_python(cex.Item))
     elif t == "CExEndComponent":
-        sim = _fsharp_map_to_python(cex.Item)
+        sim = bmaTrace_to_dict(_fsharp_map_to_python(cex.Item))
     elif t == "CExBifurcation":
-        sim = (_fsharp_map_to_python(cex.Item1),_fsharp_map_to_python(cex.Item2))
+        sim = (bmaTrace_to_dict(_fsharp_map_to_python(cex.Item1)),bmaTrace_to_dict(_fsharp_map_to_python(cex.Item2)))
     else:
         sim = None
     return({"Result":t,"Example":sim})

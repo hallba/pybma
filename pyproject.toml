@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
     "pythonnet>=3.0.0",
     "clr-loader>=0.2.0",
+    "python-libsbml",
 ]
 
 [project.optional-dependencies]

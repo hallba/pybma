@@ -12,7 +12,582 @@ try:
 except ImportError:
     LIBSBML_AVAILABLE = False
 
+def _extract_formula_from_transition(transition, var_id_map, ns):
+    """
+    Extract BMA formula from SBML-qual transition function terms.
+    Converts MathML to BMA algebraic expression string using only arithmetic operators.
+    
+    Args:
+        transition: XML transition element
+        var_id_map: Mapping from SBML IDs to BMA variable IDs
+        ns: Namespace dict
+    
+    Returns:
+        str: BMA formula or None
+    """
+    # Get function terms
+    function_terms = transition.findall('.//qual:functionTerm', ns)
+    default_term = transition.find('.//qual:defaultTerm', ns)
+    
+    # Get default result level
+    default_result = None
+    if default_term is not None:
+        default_result = (default_term.get('{http://www.sbml.org/sbml/level3/version1/qual/version1}resultLevel') or
+                         default_term.get('qual:resultLevel'))
+    
+    if not function_terms:
+        return str(default_result) if default_result else None
+    
+    # Build formula as sum of (condition * result_level) terms
+    # Formula = sum of all (condition * value) + default * (not any condition)
+    terms = []
+    
+    for term in function_terms:
+        result_level = (term.get('{http://www.sbml.org/sbml/level3/version1/qual/version1}resultLevel') or
+                       term.get('qual:resultLevel'))
+        
+        # Find math element
+        math = term.find('.//{http://www.w3.org/1998/Math/MathML}math')
+        if math is None:
+            math = term.find('.//math')
+        
+        if math is not None and result_level:
+            # Get first child of math (the actual expression)
+            expr = None
+            for child in math:
+                if child.tag != '{http://www.w3.org/1998/Math/MathML}annotation':
+                    expr = child
+                    break
+            
+            if expr is not None:
+                condition = _convert_mathml_to_bma_arithmetic(expr, var_id_map)
+                if condition:
+                    # Each term is: condition * result_level
+                    terms.append(f"({condition} * {result_level})")
+    
+    if not terms:
+        return str(default_result) if default_result else None
+    
+    # Combine all terms with max to handle mutually exclusive conditions
+    # For disjoint conditions: max(cond1*val1, cond2*val2, ..., default)
+    if default_result and default_result != "0":
+        terms.append(str(default_result))
+    
+    if len(terms) == 1:
+        return terms[0]
+    
+    # Build nested max
+    result = terms[0]
+    for term in terms[1:]:
+        result = f"max({result}, {term})"
+    
+    return result
 
+
+def _convert_mathml_to_bma_arithmetic(math_elem, var_id_map):
+    """
+    Convert MathML element to BMA formula string using only arithmetic operators.
+    Converts boolean conditions to 0/1 values.
+    Uses operators: min, max, +, -, *, /, floor, ceil
+    Variables referenced as: var(ID)
+    
+    Args:
+        math_elem: XML element with MathML
+        var_id_map: Mapping from SBML IDs to BMA variable IDs
+    
+    Returns:
+        str: BMA formula expression (evaluates to 0 or 1 for conditions)
+    """
+    # Remove namespace if present
+    tag = math_elem.tag
+    if '}' in tag:
+        tag = tag.split('}')[1]
+    
+    # Constants
+    if tag == 'cn':
+        value = math_elem.text.strip() if math_elem.text else '0'
+        return str(int(float(value)))
+    
+    # Variables
+    if tag == 'ci':
+        var_name = math_elem.text.strip() if math_elem.text else ''
+        if var_name in var_id_map:
+            return f"var({var_id_map[var_name]})"
+        return var_name
+    
+    # True/False
+    if tag == 'true':
+        return "1"
+    
+    if tag == 'false':
+        return "0"
+    
+    # Get child elements
+    children = [child for child in math_elem if child.tag != '{http://www.w3.org/1998/Math/MathML}annotation']
+    
+    # Apply (function application)
+    if tag == 'apply':
+        if len(children) == 0:
+            return "0"
+        
+        operator_elem = children[0]
+        operator_tag = operator_elem.tag
+        if '}' in operator_tag:
+            operator_tag = operator_tag.split('}')[1]
+        
+        operands = [_convert_mathml_to_bma_arithmetic(child, var_id_map) for child in children[1:]]
+        
+        # Logical operators - convert to arithmetic
+        if operator_tag == 'and':
+            # AND: min of all operands (all must be 1)
+            if len(operands) == 0:
+                return "1"
+            result = operands[0]
+            for op in operands[1:]:
+                result = f"min({result}, {op})"
+            return result
+        
+        if operator_tag == 'or':
+            # OR: max of all operands (at least one must be 1)
+            if len(operands) == 0:
+                return "0"
+            result = operands[0]
+            for op in operands[1:]:
+                result = f"max({result}, {op})"
+            return result
+        
+        if operator_tag == 'not':
+            # NOT: 1 - operand
+            return f"(1 - {operands[0]})"
+        
+        # Relational operators - return 0 or 1
+        if operator_tag == 'eq':
+            # a = b: 1 - min(1, abs(a - b))
+            left, right = operands[0], operands[1]
+            diff = f"({left} - {right})"
+            abs_diff = f"max({diff}, -{diff})"
+            return f"(1 - min(1, {abs_diff}))"
+        
+        if operator_tag == 'neq':
+            # a <> b: min(1, abs(a - b))
+            left, right = operands[0], operands[1]
+            diff = f"({left} - {right})"
+            abs_diff = f"max({diff}, -{diff})"
+            return f"min(1, {abs_diff})"
+        
+        if operator_tag == 'gt':
+            # a > b: max(0, min(1, a - b))
+            left, right = operands[0], operands[1]
+            return f"max(0, min(1, {left} - {right}))"
+        
+        if operator_tag == 'geq':
+            # a >= b: max(0, ceil(min(1, a - b + 1)))
+            left, right = operands[0], operands[1]
+            return f"max(0, ceil(min(1, ({left} - {right}) + 1)))"
+        
+        if operator_tag == 'lt':
+            # a < b: max(0, min(1, b - a))
+            left, right = operands[0], operands[1]
+            return f"max(0, min(1, {right} - {left}))"
+        
+        if operator_tag == 'leq':
+            # a <= b: max(0, ceil(min(1, b - a + 1)))
+            left, right = operands[0], operands[1]
+            return f"max(0, ceil(min(1, ({right} - {left}) + 1)))"
+        
+        # Arithmetic operators
+        if operator_tag == 'plus':
+            return "(" + " + ".join(operands) + ")"
+        
+        if operator_tag == 'minus':
+            if len(operands) == 1:
+                return f"(-{operands[0]})"
+            else:
+                return f"({operands[0]} - {operands[1]})"
+        
+        if operator_tag == 'times':
+            return "(" + " * ".join(operands) + ")"
+        
+        if operator_tag == 'divide':
+            return f"({operands[0]} / {operands[1]})"
+        
+        # Min/Max
+        if operator_tag == 'min':
+            if len(operands) == 0:
+                return "0"
+            if len(operands) == 1:
+                return operands[0]
+            result = operands[0]
+            for op in operands[1:]:
+                result = f"min({result}, {op})"
+            return result
+        
+        if operator_tag == 'max':
+            if len(operands) == 0:
+                return "0"
+            if len(operands) == 1:
+                return operands[0]
+            result = operands[0]
+            for op in operands[1:]:
+                result = f"max({result}, {op})"
+            return result
+        
+        # Floor/Ceiling
+        if operator_tag == 'floor':
+            return f"floor({operands[0]})"
+        
+        if operator_tag == 'ceiling':
+            return f"ceil({operands[0]})"
+        
+        # Abs
+        if operator_tag == 'abs':
+            return f"max({operands[0]}, -1*{operands[0]})"
+        
+        # Power
+        if operator_tag == 'power':
+            base = operands[0]
+            exp = operands[1]
+            try:
+                exp_val = int(exp)
+                if exp_val == 0:
+                    return "1"
+                elif exp_val == 1:
+                    return base
+                elif exp_val == 2:
+                    return f"({base} * {base})"
+                elif exp_val == 3:
+                    return f"({base} * {base} * {base})"
+                else:
+                    # Expand if reasonable
+                    if exp_val > 0 and exp_val <= 5:
+                        terms = [base] * exp_val
+                        return "(" + " * ".join(terms) + ")"
+                    return f"({base}^{exp})"
+            except:
+                return f"({base}^{exp})"
+    
+    # Piecewise - convert to sum of products
+    if tag == 'piecewise':
+        pieces = []
+        otherwise_value = None
+        
+        for child in children:
+            child_tag = child.tag.split('}')[1] if '}' in child.tag else child.tag
+            
+            if child_tag == 'piece':
+                piece_children = [c for c in child]
+                if len(piece_children) >= 2:
+                    value = _convert_mathml_to_bma_arithmetic(piece_children[0], var_id_map)
+                    condition = _convert_mathml_to_bma_arithmetic(piece_children[1], var_id_map)
+                    pieces.append((condition, value))
+            
+            elif child_tag == 'otherwise':
+                otherwise_children = [c for c in child]
+                if otherwise_children:
+                    otherwise_value = _convert_mathml_to_bma_arithmetic(otherwise_children[0], var_id_map)
+        
+        # Convert piecewise to: max(cond1*val1, cond2*val2, ..., otherwise)
+        terms = []
+        for condition, value in pieces:
+            terms.append(f"({condition} * {value})")
+        
+        if otherwise_value:
+            terms.append(otherwise_value)
+        
+        if not terms:
+            return "0"
+        
+        if len(terms) == 1:
+            return terms[0]
+        
+        result = terms[0]
+        for term in terms[1:]:
+            result = f"max({result}, {term})"
+        
+        return result
+    
+    # Unknown
+    return "0"
+
+
+def _extract_formula_from_transition_libsbml(transition, var_id_map):
+    """
+    Extract BMA formula from libsbml transition function terms.
+    Converts MathML AST to BMA algebraic expression using only arithmetic operators.
+    
+    Args:
+        transition: libsbml Transition object
+        var_id_map: Mapping from SBML IDs to BMA variable IDs
+    
+    Returns:
+        str: BMA formula or None
+    """
+    # Get default result level
+    default_result = None
+    if transition.isSetDefaultTerm():
+        default_term = transition.getDefaultTerm()
+        default_result = default_term.getResultLevel()
+    
+    # Get function terms
+    num_terms = transition.getNumFunctionTerms()
+    
+    if num_terms == 0:
+        return str(default_result) if default_result is not None else None
+    
+    # Build formula as max of (condition * result_level) terms
+    terms = []
+    
+    for i in range(num_terms):
+        function_term = transition.getFunctionTerm(i)
+        result_level = function_term.getResultLevel()
+        
+        math = function_term.getMath()
+        
+        if math is not None:
+            condition = _convert_mathml_ast_to_bma_arithmetic(math, var_id_map)
+            if condition:
+                terms.append(f"({condition} * {result_level})")
+    
+    if not terms:
+        return str(default_result) if default_result is not None else None
+    
+    # Add default if present
+    if default_result and default_result != "0":
+        terms.append(str(default_result))
+    
+    if len(terms) == 1:
+        return terms[0]
+    
+    # Build nested max
+    result = terms[0]
+    for term in terms[1:]:
+        result = f"max({result}, {term})"
+    
+    return result
+
+
+def _convert_mathml_ast_to_bma_arithmetic(math_ast, var_id_map):
+    """
+    Convert libsbml MathML AST to BMA formula string using only arithmetic operators.
+    Converts boolean conditions to 0/1 values.
+    Uses operators: min, max, +, -, *, /, floor, ceil
+    Variables referenced as: var(ID)
+    
+    Args:
+        math_ast: libsbml ASTNode
+        var_id_map: Mapping from SBML IDs to BMA variable IDs
+    
+    Returns:
+        str: BMA formula expression (evaluates to 0 or 1 for conditions)
+    """
+    if math_ast is None:
+        return None
+    
+    node_type = math_ast.getType()
+    num_children = math_ast.getNumChildren()
+    
+    # Constants
+    if node_type == libsbml.AST_INTEGER:
+        return str(math_ast.getInteger())
+    
+    if node_type == libsbml.AST_REAL:
+        return str(int(math_ast.getReal()))
+    
+    if node_type == libsbml.AST_RATIONAL:
+        numerator = math_ast.getNumerator()
+        denominator = math_ast.getDenominator()
+        return f"({numerator} / {denominator})"
+    
+    # Variables
+    if node_type == libsbml.AST_NAME:
+        var_name = math_ast.getName()
+        if var_name in var_id_map:
+            return f"var({var_id_map[var_name]})"
+        return var_name
+    
+    # Constants
+    if node_type == libsbml.AST_CONSTANT_TRUE:
+        return "1"
+    
+    if node_type == libsbml.AST_CONSTANT_FALSE:
+        return "0"
+    
+    # Logical operators - convert to arithmetic
+    if node_type == libsbml.AST_LOGICAL_AND:
+        # AND: min of all operands
+        if num_children == 0:
+            return "1"
+        result = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        for i in range(1, num_children):
+            operand = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(i), var_id_map)
+            result = f"min({result}, {operand})"
+        return result
+    
+    if node_type == libsbml.AST_LOGICAL_OR:
+        # OR: max of all operands
+        if num_children == 0:
+            return "0"
+        result = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        for i in range(1, num_children):
+            operand = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(i), var_id_map)
+            result = f"max({result}, {operand})"
+        return result
+    
+    if node_type == libsbml.AST_LOGICAL_NOT:
+        # NOT: 1 - operand
+        operand = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        return f"(1 - {operand})"
+    
+    # Relational operators - return 0 or 1
+    if node_type == libsbml.AST_RELATIONAL_EQ:
+        # a = b: 1 if equal, 0 otherwise
+        left = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        right = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(1), var_id_map)
+        diff = f"({left} - {right})"
+        abs_diff = f"max({diff}, -1*{diff})"
+        return f"(1 - min(1, {abs_diff}))"
+    
+    if node_type == libsbml.AST_RELATIONAL_NEQ:
+        # a <> b: 1 if not equal, 0 otherwise
+        left = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        right = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(1), var_id_map)
+        diff = f"({left} - {right})"
+        abs_diff = f"max({diff}, -1*{diff})"
+        return f"min(1, {abs_diff})"
+    
+    if node_type == libsbml.AST_RELATIONAL_GT:
+        # a > b: 1 if a > b, 0 otherwise
+        left = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        right = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(1), var_id_map)
+        return f"max(0, min(1, {left} - {right}))"
+    
+    if node_type == libsbml.AST_RELATIONAL_GEQ:
+        # a >= b
+        left = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        right = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(1), var_id_map)
+        return f"max(0, ceil(min(1, ({left} - {right}) + 1)))"
+    
+    if node_type == libsbml.AST_RELATIONAL_LT:
+        # a < b
+        left = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        right = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(1), var_id_map)
+        return f"max(0, min(1, {right} - {left}))"
+    
+    if node_type == libsbml.AST_RELATIONAL_LEQ:
+        # a <= b
+        left = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        right = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(1), var_id_map)
+        return f"max(0, ceil(min(1, ({right} - {left}) + 1)))"
+    
+    # Arithmetic operators
+    if node_type == libsbml.AST_PLUS:
+        operands = [_convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(i), var_id_map) 
+                   for i in range(num_children)]
+        return "(" + " + ".join(operands) + ")"
+    
+    if node_type == libsbml.AST_MINUS:
+        if num_children == 1:
+            operand = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+            return f"(-{operand})"
+        else:
+            left = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+            right = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(1), var_id_map)
+            return f"({left} - {right})"
+    
+    if node_type == libsbml.AST_TIMES:
+        operands = [_convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(i), var_id_map) 
+                   for i in range(num_children)]
+        return "(" + " * ".join(operands) + ")"
+    
+    if node_type == libsbml.AST_DIVIDE:
+        left = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        right = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(1), var_id_map)
+        return f"({left} / {right})"
+    
+    # Functions
+    if node_type == libsbml.AST_FUNCTION_MIN:
+        if num_children == 0:
+            return "0"
+        result = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        for i in range(1, num_children):
+            operand = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(i), var_id_map)
+            result = f"min({result}, {operand})"
+        return result
+    
+    if node_type == libsbml.AST_FUNCTION_MAX:
+        if num_children == 0:
+            return "0"
+        result = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        for i in range(1, num_children):
+            operand = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(i), var_id_map)
+            result = f"max({result}, {operand})"
+        return result
+    
+    if node_type == libsbml.AST_FUNCTION_FLOOR:
+        operand = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        return f"floor({operand})"
+    
+    if node_type == libsbml.AST_FUNCTION_CEILING:
+        operand = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        return f"ceil({operand})"
+    
+    if node_type == libsbml.AST_FUNCTION_ABS:
+        operand = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        return f"max({operand}, -{operand})"
+    
+    # Power
+    if node_type == libsbml.AST_POWER:
+        base = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(0), var_id_map)
+        exponent = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(1), var_id_map)
+        
+        try:
+            exp_val = int(exponent)
+            if exp_val == 0:
+                return "1"
+            elif exp_val == 1:
+                return base
+            elif exp_val == 2:
+                return f"({base} * {base})"
+            elif exp_val == 3:
+                return f"({base} * {base} * {base})"
+            elif exp_val > 0 and exp_val <= 5:
+                terms = [base] * exp_val
+                return "(" + " * ".join(terms) + ")"
+        except:
+            pass
+        
+        return f"({base}^{exponent})"
+    
+    # Piecewise - convert to max of products
+    if node_type == libsbml.AST_FUNCTION_PIECEWISE:
+        terms = []
+        i = 0
+        while i < num_children - 1:
+            value = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(i), var_id_map)
+            condition = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(i + 1), var_id_map)
+            terms.append(f"({condition} * {value})")
+            i += 2
+        
+        # Otherwise value
+        if num_children % 2 == 1:
+            otherwise = _convert_mathml_ast_to_bma_arithmetic(math_ast.getChild(num_children - 1), var_id_map)
+            terms.append(otherwise)
+        
+        if not terms:
+            return "0"
+        
+        if len(terms) == 1:
+            return terms[0]
+        
+        result = terms[0]
+        for term in terms[1:]:
+            result = f"max({result}, {term})"
+        
+        return result
+    
+    # Unknown
+    return "0"
+    
 # ============================================================================
 # Public API
 # ============================================================================
@@ -632,10 +1207,15 @@ def _load_with_libsbml(sbml_path):
                 relationships.append(relationship)
         
         # Extract formula (simplified)
+        '''
         if transition.getNumFunctionTerms() > 0:
             function_term = transition.getFunctionTerm(0)
             result_level = function_term.getResultLevel()
             variables[target_var_id]['Formula'] = str(result_level)
+        ''' 
+        formula = _extract_formula_from_transition_libsbml(transition, var_id_map)
+        if formula:
+            variables[target_var_id]['Formula'] = formula
     
     # Create BMA model
     bma_model = {

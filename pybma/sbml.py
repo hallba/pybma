@@ -161,14 +161,23 @@ def export_to_sbml_qual(bma_model, output_path):
             'qual:id': f"tr_{target_id}"
         })
         
-        # Add inputs
+        # Add inputs with signs if available
         inputs_list = ET.SubElement(transition, 'qual:listOfInputs')
         for rel in rels:
-            ET.SubElement(inputs_list, 'qual:input', {
+            input_attrs = {
                 'qual:id': f"in_{rel['FromVariable']}_{target_id}",
                 'qual:qualitativeSpecies': f"var_{rel['FromVariable']}",
                 'qual:transitionEffect': 'none'
-            })
+            }
+            
+            # Add sign if available
+            if 'Type' in rel:
+                if rel['Type'] == 1:  # Activator in BMA
+                    input_attrs['qual:sign'] = 'positive'
+                elif rel['Type'] == 2:  # Inhibitor in BMA
+                    input_attrs['qual:sign'] = 'negative'
+            
+            ET.SubElement(inputs_list, 'qual:input', input_attrs)
         
         # Add outputs
         outputs_list = ET.SubElement(transition, 'qual:listOfOutputs')
@@ -178,7 +187,7 @@ def export_to_sbml_qual(bma_model, output_path):
             'qual:transitionEffect': 'assignmentLevel'
         })
         
-        # Add function terms (simplified)
+        # Add function terms
         func_terms = ET.SubElement(transition, 'qual:listOfFunctionTerms')
         ET.SubElement(func_terms, 'qual:defaultTerm', {
             'qual:resultLevel': '0'
@@ -199,11 +208,6 @@ def validate_sbml_qual(sbml_path):
     
     Returns:
         dict: {'valid': bool, 'errors': list, 'warnings': list}
-    
-    Example:
-        result = validate_sbml_qual("model.sbml")
-        if not result['valid']:
-            print("Errors:", result['errors'])
     """
     if not LIBSBML_AVAILABLE:
         return {
@@ -242,11 +246,6 @@ def get_sbml_info(sbml_path):
     
     Returns:
         dict: Model information
-    
-    Example:
-        info = get_sbml_info("model.sbml")
-        print(f"Model: {info['model_name']}")
-        print(f"Variables: {info['num_species']}")
     """
     if not LIBSBML_AVAILABLE:
         raise ImportError("libsbml required for this function. Install with: pip install python-libsbml")
@@ -287,7 +286,7 @@ def get_sbml_info(sbml_path):
 def _load_native(sbml_path):
     """
     Load SBML-qual using native XML parsing (no libsbml required).
-    Basic implementation - handles simple SBML-qual files.
+    Handles layout information and relationship signs.
     """
     tree = ET.parse(sbml_path)
     root = tree.getroot()
@@ -295,29 +294,42 @@ def _load_native(sbml_path):
     # SBML namespaces
     ns = {
         'sbml': 'http://www.sbml.org/sbml/level3/version1/core',
-        'qual': 'http://www.sbml.org/sbml/level3/version1/qual/version1'
+        'qual': 'http://www.sbml.org/sbml/level3/version1/qual/version1',
+        'layout': 'http://www.sbml.org/sbml/level3/version1/layout/version1'
     }
     
     # Extract model
     sbml_model = root.find('sbml:model', ns)
     model_name = sbml_model.get('name', 'Imported SBML Model') if sbml_model is not None else 'Imported SBML Model'
+    if not model_name or model_name == 'Imported SBML Model':
+        model_name = sbml_model.get('id', 'Imported SBML Model') if sbml_model is not None else 'Imported SBML Model'
     
     # Extract qualitative species (variables)
     variables = []
     qual_species_list = root.findall('.//qual:qualitativeSpecies', ns)
     
     var_id_map = {}  # Map SBML IDs to BMA IDs
+    var_name_map = {}  # Map variable names to IDs for layout lookup
     
     for idx, species in enumerate(qual_species_list):
-        sbml_id = species.get('{http://www.sbml.org/sbml/level3/version1/qual/version1}id') or species.get('id')
-        name = species.get('{http://www.sbml.org/sbml/level3/version1/qual/version1}name') or species.get('name') or sbml_id
+        # Try with and without namespace prefix
+        sbml_id = (species.get('{http://www.sbml.org/sbml/level3/version1/qual/version1}id') or 
+                   species.get('qual:id') or 
+                   species.get('id'))
+        
+        name = (species.get('{http://www.sbml.org/sbml/level3/version1/qual/version1}name') or 
+                species.get('qual:name') or 
+                species.get('name') or 
+                sbml_id)
         
         # Get max level
-        max_level = species.get('{http://www.sbml.org/sbml/level3/version1/qual/version1}maxLevel')
+        max_level = (species.get('{http://www.sbml.org/sbml/level3/version1/qual/version1}maxLevel') or
+                     species.get('qual:maxLevel'))
         range_to = int(max_level) if max_level else 1
         
         # Initial level
-        initial_level = species.get('{http://www.sbml.org/sbml/level3/version1/qual/version1}initialLevel')
+        initial_level = (species.get('{http://www.sbml.org/sbml/level3/version1/qual/version1}initialLevel') or
+                        species.get('qual:initialLevel'))
         initial = int(initial_level) if initial_level else 0
         
         var = {
@@ -330,8 +342,94 @@ def _load_native(sbml_path):
         
         variables.append(var)
         var_id_map[sbml_id] = idx
+        var_name_map[name] = idx
+        var_name_map[sbml_id] = idx  # Also map by ID
     
-    # Extract transitions (relationships)
+    # Extract layout information
+    layout_variables = []
+    
+    # Try to find layout in different possible locations
+    layouts = root.findall('.//layout:layout', ns)
+    
+    for layout in layouts:
+        # Look for speciesGlyph elements
+        species_glyphs = layout.findall('.//layout:speciesGlyph', ns)
+        
+        for glyph in species_glyphs:
+            species_ref = (glyph.get('{http://www.sbml.org/sbml/level3/version1/layout/version1}species') or
+                          glyph.get('layout:species') or
+                          glyph.get('species'))
+            
+            if species_ref and species_ref in var_id_map:
+                var_id = var_id_map[species_ref]
+                
+                # Get bounding box
+                bbox = glyph.find('.//layout:boundingBox', ns)
+                if bbox is not None:
+                    pos = bbox.find('.//layout:position', ns)
+                    
+                    if pos is not None:
+                        x = (pos.get('{http://www.sbml.org/sbml/level3/version1/layout/version1}x') or
+                             pos.get('layout:x') or
+                             pos.get('x'))
+                        y = (pos.get('{http://www.sbml.org/sbml/level3/version1/layout/version1}y') or
+                             pos.get('layout:y') or
+                             pos.get('y'))
+                        
+                        if x and y:
+                            layout_variables.append({
+                                'Id': var_id,
+                                'Name': variables[var_id]['Name'],
+                                'Type': 'Default',
+                                'X': float(x),
+                                'Y': float(y),
+                                'CellX': 0,
+                                'CellY': 0,
+                                'Angle': 0,
+                                'Description': ''
+                            })
+        
+        # Also look for generalGlyph elements (used in some tools)
+        general_glyphs = layout.findall('.//layout:generalGlyph', ns)
+        
+        for glyph in general_glyphs:
+            # Get reference attribute
+            reference = (glyph.get('{http://www.sbml.org/sbml/level3/version1/layout/version1}reference') or
+                        glyph.get('layout:reference') or
+                        glyph.get('reference'))
+            
+            if reference:
+                # Look up by name or ID
+                var_id = var_name_map.get(reference)
+                
+                if var_id is not None:
+                    # Get bounding box
+                    bbox = glyph.find('.//layout:boundingBox', ns)
+                    if bbox is not None:
+                        pos = bbox.find('.//layout:position', ns)
+                        
+                        if pos is not None:
+                            x = (pos.get('{http://www.sbml.org/sbml/level3/version1/layout/version1}x') or
+                                 pos.get('layout:x') or
+                                 pos.get('x'))
+                            y = (pos.get('{http://www.sbml.org/sbml/level3/version1/layout/version1}y') or
+                                 pos.get('layout:y') or
+                                 pos.get('y'))
+                            
+                            if x and y:
+                                layout_variables.append({
+                                    'Id': var_id,
+                                    'Name': variables[var_id]['Name'],
+                                    'Type': 'Default',
+                                    'X': float(x),
+                                    'Y': float(y),
+                                    'CellX': 0,
+                                    'CellY': 0,
+                                    'Angle': 0,
+                                    'Description': ''
+                                })
+    
+    # Extract transitions (relationships with signs)
     transitions = root.findall('.//qual:transition', ns)
     relationships = []
     
@@ -341,24 +439,44 @@ def _load_native(sbml_path):
         if not outputs:
             continue
         
-        target_id = outputs[0].get('{http://www.sbml.org/sbml/level3/version1/qual/version1}qualitativeSpecies')
+        target_id = (outputs[0].get('{http://www.sbml.org/sbml/level3/version1/qual/version1}qualitativeSpecies') or
+                     outputs[0].get('qual:qualitativeSpecies'))
+        
         if target_id not in var_id_map:
             continue
         
         target_var_id = var_id_map[target_id]
         
-        # Get input variables
+        # Get input variables with signs
         inputs = transition.findall('.//qual:input', ns)
         
         for input_elem in inputs:
-            input_id = input_elem.get('{http://www.sbml.org/sbml/level3/version1/qual/version1}qualitativeSpecies')
+            input_id = (input_elem.get('{http://www.sbml.org/sbml/level3/version1/qual/version1}qualitativeSpecies') or
+                       input_elem.get('qual:qualitativeSpecies'))
+            
             if input_id in var_id_map:
                 input_var_id = var_id_map[input_id]
+                
+                # Get sign (positive/negative/dual/unknown)
+                sign = (input_elem.get('{http://www.sbml.org/sbml/level3/version1/qual/version1}sign') or
+                       input_elem.get('qual:sign'))
+                
+                # Map SBML sign to BMA Type
+                # BMA: 1 = Activator, 2 = Inhibitor
+                # Default to activator if ambiguous
+                rel_type = "Activator"  # Default: Activator
+                
+                if sign == 'negative':
+                    rel_type = "Inhibitor"  # Inhibitor
+                elif sign == 'positive':
+                    rel_type = "Activator"  # Activator
+                # For 'dual', 'unknown', or missing: default to activator (1)
                 
                 relationship = {
                     'Id': len(relationships),
                     'FromVariable': input_var_id,
                     'ToVariable': target_var_id,
+                    'Type': rel_type
                 }
                 relationships.append(relationship)
     
@@ -370,7 +488,7 @@ def _load_native(sbml_path):
             'Relationships': relationships
         },
         'Layout': {
-            'Variables': [],
+            'Variables': layout_variables,
             'Containers': [],
             'AnnotatedGridCells': [],
             'Description': f'Imported from SBML-qual: {Path(sbml_path).name}'
@@ -381,8 +499,6 @@ def _load_native(sbml_path):
         }
     }
     
-    return bma_model
-
 
 # ============================================================================
 # libsbml implementation (enhanced)
@@ -390,7 +506,8 @@ def _load_native(sbml_path):
 
 def _load_with_libsbml(sbml_path):
     """
-    Load SBML-qual using libsbml library (handles complex files).
+    Load SBML-qual using libsbml library.
+    Handles layout information and relationship signs.
     """
     document = libsbml.readSBMLFromFile(str(sbml_path))
     
@@ -440,7 +557,35 @@ def _load_with_libsbml(sbml_path):
         variables.append(var)
         var_id_map[sbml_id] = i
     
-    # Extract transitions
+    # Extract layout information
+    layout_variables = []
+    layout_plugin = model.getPlugin("layout")
+    
+    if layout_plugin is not None and layout_plugin.getNumLayouts() > 0:
+        layout = layout_plugin.getLayout(0)
+        
+        for i in range(layout.getNumGeneralGlyphs()):
+            glyph = layout.getGeneralGlyph(i)
+            species_ref = glyph.getReferenceId()
+            
+            if species_ref in var_id_map:
+                var_id = var_id_map[species_ref]
+                bbox = glyph.getBoundingBox()
+                
+                if bbox is not None:
+                    layout_variables.append({
+                        'Id': var_id,
+                        'Name': variables[var_id]['Name'],
+                        'Type': 'Default',
+                        'PositionX': bbox.getX(),
+                        'PositionY': bbox.getY(),
+                        'CellX': 0,
+                        'CellY': 0,
+                        'Angle': 0,
+                        'Description': ''
+                    })
+    
+    # Extract transitions with signs
     relationships = []
     
     for i in range(qual_plugin.getNumTransitions()):
@@ -458,7 +603,7 @@ def _load_with_libsbml(sbml_path):
         
         target_var_id = var_id_map[target_id]
         
-        # Get inputs
+        # Get inputs with signs
         for j in range(transition.getNumInputs()):
             input_elem = transition.getInput(j)
             input_id = input_elem.getQualitativeSpecies()
@@ -466,14 +611,27 @@ def _load_with_libsbml(sbml_path):
             if input_id in var_id_map:
                 input_var_id = var_id_map[input_id]
                 
+                # Get sign
+                sign = input_elem.getSign()
+                
+                # Map to BMA type (1=Activator, 2=Inhibitor)
+                rel_type = "Activator"  # Default: Activator
+                
+                if sign == libsbml.INPUT_SIGN_NEGATIVE:
+                    rel_type = "Inhibitor"  # Inhibitor
+                elif sign == libsbml.INPUT_SIGN_POSITIVE:
+                    rel_type = "Activator"  # Activator
+                # For DUAL, UNKNOWN, or unset: default to activator
+                
                 relationship = {
                     'Id': len(relationships),
                     'FromVariable': input_var_id,
                     'ToVariable': target_var_id,
+                    'Type': rel_type
                 }
                 relationships.append(relationship)
         
-        # Extract formula (simplified - could be enhanced with MathML parsing)
+        # Extract formula (simplified)
         if transition.getNumFunctionTerms() > 0:
             function_term = transition.getFunctionTerm(0)
             result_level = function_term.getResultLevel()
@@ -487,7 +645,7 @@ def _load_with_libsbml(sbml_path):
             'Relationships': relationships
         },
         'Layout': {
-            'Variables': [],
+            'Variables': layout_variables,
             'Containers': [],
             'AnnotatedGridCells': [],
             'Description': f'Imported from SBML-qual'

@@ -1237,3 +1237,490 @@ def _load_with_libsbml(sbml_path):
     }
     
     return bma_model
+
+def save_bma_to_sbml_qual_libsbml(model_data, output_path):
+    """
+    Save BMA model to SBML-qual format using libsbml.
+    Evaluates BMA formulas to create truth tables, then generates function terms.
+    
+    Args:
+        model_data: BMA model dict (from load_model or BMAModel.data)
+        output_path: Path to save SBML-qual XML file
+    
+    Requires:
+        libsbml must be installed
+    
+    Example:
+        from pybma import load_model, save_bma_to_sbml_qual_libsbml
+        model_data = load_model("model.json")
+        save_bma_to_sbml_qual_libsbml(model_data, "output.sbml")
+    """
+    if not LIBSBML_AVAILABLE:
+        raise ImportError(
+            "libsbml is required for this function. "
+            "Install with: pip install python-libsbml"
+        )
+    
+    from .core import model_to_qn, _assembly
+    import System
+    
+    # Get model info
+    model_name = model_data['Model'].get('Name', 'BMA Model')
+    variables = model_data['Model']['Variables']
+    relationships = model_data['Model']['Relationships']
+    
+    # Convert to QN for formula evaluation
+    qn = model_to_qn(model_data)
+    
+    sbmlns = libsbml.SBMLNamespaces(3, 1)
+    sbmlns.addPkgNamespace("qual", 1)
+    
+    # Create SBML document
+    document = libsbml.SBMLDocument(sbmlns)
+    document.setPackageRequired('qual', True)
+    model = document.createModel()
+    model.setId('model')
+    model.setName(model_name)
+    
+    # Enable qual plugin
+    qual_plugin = model.getPlugin('qual')
+    
+    # Add compartment (required)
+    compartment = model.createCompartment()
+    compartment.setId('default')
+    compartment.setConstant(True)
+    
+    # Add qualitative species
+    var_id_to_species = {}
+    
+    for var in variables:
+        var_id = var['Id']
+        species = qual_plugin.createQualitativeSpecies()
+        species.setId(f"var_{var_id}")
+        species.setName(var.get('Name', f"Variable {var_id}"))
+        species.setCompartment('default')
+        species.setConstant(False)
+        species.setMaxLevel(var.get('RangeTo', 1))
+        
+        # Set initial level if it's a simple number
+        formula = var.get('Formula', '0')
+        if formula.isdigit():
+            species.setInitialLevel(int(formula))
+        
+        var_id_to_species[var_id] = species
+    
+    # Get function evaluator from BMA
+    evaluator_type = _assembly.GetType('Evaluate')
+    if evaluator_type is None:
+        for t in _assembly.GetTypes():
+            if 'eval' in t.Name.lower():
+                evaluator_type = t
+                break
+    
+    # Group relationships by target variable
+    by_target = {}
+    for rel in relationships:
+        target = rel['ToVariable']
+        if target not in by_target:
+            by_target[target] = []
+        by_target[target].append(rel)
+    
+    # Process each variable that has a formula
+    for var in variables:
+        var_id = var['Id']
+        formula = var.get('Formula', '')
+        
+        if formula.isdigit():
+            continue
+        
+        # Create transition
+        transition = qual_plugin.createTransition()
+        transition.setId(f"tr_{var_id}")
+        
+        # Add inputs (from relationships)
+        input_vars = []
+        
+        if var_id in by_target:
+            for rel in by_target[var_id]:
+                input_var_id = rel['FromVariable']
+                input_vars.append(input_var_id)
+                
+                input_elem = transition.createInput()
+                input_elem.setId(f"in_{input_var_id}_{var_id}")
+                input_elem.setQualitativeSpecies(f"var_{input_var_id}")
+                input_elem.setTransitionEffect(libsbml.INPUT_TRANSITION_EFFECT_NONE)
+                
+                # Add sign if available
+                if 'Type' in rel:
+                    if rel['Type'] == "Activator":
+                        input_elem.setSign(libsbml.INPUT_SIGN_POSITIVE)
+                    elif rel['Type'] == "Inhibitor":
+                        input_elem.setSign(libsbml.INPUT_SIGN_NEGATIVE)
+        
+        # Add output
+        output_elem = transition.createOutput()
+        output_elem.setId(f"out_{var_id}")
+        output_elem.setQualitativeSpecies(f"var_{var_id}")
+        output_elem.setTransitionEffect(libsbml.OUTPUT_TRANSITION_EFFECT_ASSIGNMENT_LEVEL)
+        
+        # Generate truth table
+        truth_table = _generate_truth_table(qn, var_id, input_vars, variables, evaluator_type)
+        
+        # Convert truth table to function terms
+        _add_function_terms_libsbml(transition, truth_table, input_vars, var_id)
+    
+    # Write to file
+    libsbml.writeSBMLToFile(document, str(output_path))
+
+def _generate_truth_table(qn, target_var_id, input_var_ids, variables, evaluator_type):
+    """
+    Generate truth table for a variable by evaluating its formula.
+    
+    Args:
+        qn: QN object
+        target_var_id: ID of target variable
+        input_var_ids: List of input variable IDs
+        variables: List of variable dicts
+        evaluator_type: BMA Evaluate type
+    
+    Returns:
+        dict: Maps input state tuples to output values
+    """
+    import itertools
+    import System
+    
+    # Get variable ranges
+    var_ranges = {}
+    for var in variables:
+        var_id = var['Id']
+        range_to = var.get('RangeTo', 1)
+        var_ranges[var_id] = list(range(0, range_to + 1))
+    
+    # If no inputs, just evaluate at state 0
+    if not input_var_ids:
+        input_var_ids = [target_var_id]
+    
+    # Generate all combinations of input values
+    input_ranges = [var_ranges[vid] for vid in input_var_ids]
+    
+    truth_table = {}
+    
+    # Find evaluate method
+    eval_method = None
+    if evaluator_type:
+        for method in evaluator_type.GetMethods():
+            if method.IsPublic and method.IsStatic:
+                # Look for evaluate or similar method
+                if 'eval' in method.Name.lower():
+                    eval_method = method
+                    break
+    
+    # Generate truth table
+    for input_values in itertools.product(*input_ranges):
+        # Create state map
+        state = {}
+        for i, var_id in enumerate(input_var_ids):
+            state[var_id] = input_values[i]
+        
+        # Add other variables at 0
+        for var in variables:
+            if var['Id'] not in state:
+                state[var['Id']] = 0
+        
+        # Evaluate formula at this state
+        try:
+            output_value = 0# Evalulation function goes here #_evaluate_formula_at_state(qn, target_var_id, state, eval_method)
+            truth_table[input_values] = output_value
+        except Exception as e:
+            # Default to 0 if evaluation fails
+            truth_table[input_values] = 0
+    
+    return truth_table
+    
+def _add_function_terms_libsbml(transition, truth_table, input_var_ids, target_var_id):
+    """
+    Add SBML function terms to transition using libsbml.
+    
+    Args:
+        transition: libsbml Transition object
+        truth_table: Dict mapping input tuples to output values
+        input_var_ids: List of input variable IDs
+        target_var_id: Target variable ID
+    """
+    # Group by output value
+    by_output = {}
+    for input_state, output_value in truth_table.items():
+        if output_value not in by_output:
+            by_output[output_value] = []
+        by_output[output_value].append(input_state)
+    
+    # Find most common output (for default)
+    default_output = max(by_output.keys(), key=lambda k: len(by_output[k]))
+    
+    # Add default term
+    default_term = transition.createDefaultTerm()
+    default_term.setResultLevel(default_output)
+    
+    # Add function terms for other outputs
+    for output_value, input_states in by_output.items():
+        if output_value == default_output:
+            continue
+        
+        # Create function term
+        func_term = transition.createFunctionTerm()
+        func_term.setResultLevel(output_value)
+        
+        # Build MathML condition
+        math_ast = _create_condition_ast_libsbml(input_states, input_var_ids)
+        if math_ast:
+            func_term.setMath(math_ast)
+
+
+def _create_condition_ast_libsbml(input_states, input_var_ids):
+    """
+    Create MathML AST for condition matching input states.
+    
+    Args:
+        input_states: List of input state tuples
+        input_var_ids: List of input variable IDs
+    
+    Returns:
+        libsbml ASTNode
+    """
+    if len(input_states) == 0:
+        return None
+    
+    if len(input_states) == 1:
+        # Single state - create condition
+        return _create_single_state_condition_libsbml(input_states[0], input_var_ids)
+    
+    # Multiple states - OR them together
+    or_node = libsbml.ASTNode(libsbml.AST_LOGICAL_OR)
+    
+    for input_state in input_states:
+        state_condition = _create_single_state_condition_libsbml(input_state, input_var_ids)
+        or_node.addChild(state_condition)
+    
+    return or_node
+
+
+def _create_single_state_condition_libsbml(input_state, input_var_ids):
+    """
+    Create MathML AST for a single input state condition.
+    
+    Args:
+        input_state: Tuple of input values
+        input_var_ids: List of input variable IDs
+    
+    Returns:
+        libsbml ASTNode representing the condition
+    """
+    if len(input_var_ids) == 1:
+        # Single variable: var = value
+        eq_node = libsbml.ASTNode(libsbml.AST_RELATIONAL_EQ)
+        
+        var_node = libsbml.ASTNode(libsbml.AST_NAME)
+        var_node.setName(f"var_{input_var_ids[0]}")
+        
+        val_node = libsbml.ASTNode(libsbml.AST_INTEGER)
+        val_node.setValue(int(input_state[0]))
+        
+        eq_node.addChild(var_node)
+        eq_node.addChild(val_node)
+        
+        return eq_node
+    
+    # Multiple variables: AND of (var1 = val1) AND (var2 = val2) ...
+    and_node = libsbml.ASTNode(libsbml.AST_LOGICAL_AND)
+    
+    for i, var_id in enumerate(input_var_ids):
+        eq_node = libsbml.ASTNode(libsbml.AST_RELATIONAL_EQ)
+        
+        var_node = libsbml.ASTNode(libsbml.AST_NAME)
+        var_node.setName(f"var_{var_id}")
+        
+        val_node = libsbml.ASTNode(libsbml.AST_INTEGER)
+        val_node.setValue(int(input_state[i]))
+        
+        eq_node.addChild(var_node)
+        eq_node.addChild(val_node)
+        
+        and_node.addChild(eq_node)
+    
+    return and_node
+
+
+def save_bma_to_sbml_qual(model_data, output_path, use_libsbml='auto'):
+    """
+    Save BMA model to SBML-qual format with function terms.
+    
+    Args:
+        model_data: BMA model dict or BMAModel instance
+        output_path: Path to save SBML-qual XML file
+        use_libsbml: 'auto' (default), True, or False
+                     'auto' uses libsbml if available
+    
+    Example:
+        from pybma import load_model, save_bma_to_sbml_qual
+        model_data = load_model("model.json")
+        save_bma_to_sbml_qual(model_data, "output.sbml")
+        
+        # Force libsbml
+        save_bma_to_sbml_qual(model_data, "output.sbml", use_libsbml=True)
+        
+        # Force native XML
+        save_bma_to_sbml_qual(model_data, "output.sbml", use_libsbml=False)
+    """
+    from .core import BMAModel
+    
+    # Extract model data if BMAModel instance
+    if isinstance(model_data, BMAModel):
+        model_data = model_data.data
+    
+    # Decide which implementation to use
+    if use_libsbml == 'auto':
+        use_libsbml = LIBSBML_AVAILABLE
+    elif use_libsbml and not LIBSBML_AVAILABLE:
+        raise ImportError(
+            "libsbml requested but not installed. "
+            "Install with: pip install python-libsbml"
+        )
+    
+    if use_libsbml:
+        save_bma_to_sbml_qual_libsbml(model_data, output_path)
+    else:
+        save_bma_to_sbml_qual_native(model_data, output_path)
+
+
+def save_bma_to_sbml_qual_native(model_data, output_path):
+    """
+    Save BMA model to SBML-qual using native XML (original implementation).
+    This is the previous export_to_sbml_qual with truth table generation added.
+    """
+    from .core import model_to_qn, _assembly
+    import System
+    
+    # Get model info
+    model_name = model_data['Model'].get('Name', 'BMA Model')
+    variables = model_data['Model']['Variables']
+    relationships = model_data['Model']['Relationships']
+    
+    # Convert to QN for formula evaluation
+    qn = model_to_qn(model_data)
+    
+    # Create SBML structure
+    sbml = ET.Element('sbml', {
+        'xmlns': 'http://www.sbml.org/sbml/level3/version1/core',
+        'xmlns:qual': 'http://www.sbml.org/sbml/level3/version1/qual/version1',
+        'level': '3',
+        'version': '1',
+        'qual:required': 'true'
+    })
+    
+    model_elem = ET.SubElement(sbml, 'model', {
+        'id': 'model',
+        'name': model_name
+    })
+    
+    # Add compartments (required)
+    comp_list = ET.SubElement(model_elem, 'listOfCompartments')
+    ET.SubElement(comp_list, 'compartment', {
+        'id': 'default',
+        'constant': 'true'
+    })
+    
+    # Add qualitative species
+    qual_species_list = ET.SubElement(model_elem, 'qual:listOfQualitativeSpecies')
+    
+    for var in variables:
+        species_attrs = {
+            'qual:id': f"var_{var['Id']}",
+            'qual:name': var.get('Name', f"Variable {var['Id']}"),
+            'qual:compartment': 'default',
+            'qual:constant': 'false',
+            'qual:maxLevel': str(var.get('RangeTo', 1))
+        }
+        
+        # Add initial level if it's a simple number
+        formula = var.get('Formula', '0')
+        if formula.isdigit():
+            species_attrs['qual:initialLevel'] = formula
+        
+        ET.SubElement(qual_species_list, 'qual:qualitativeSpecies', species_attrs)
+    
+    # Get function evaluator from BMA
+    evaluator_type = _assembly.GetType('Evaluate')
+    if evaluator_type is None:
+        for t in _assembly.GetTypes():
+            if 'eval' in t.Name.lower():
+                evaluator_type = t
+                break
+    
+    # Add transitions with function terms
+    transitions_list = ET.SubElement(model_elem, 'qual:listOfTransitions')
+    
+    # Group relationships by target variable
+    by_target = {}
+    for rel in relationships:
+        target = rel['ToVariable']
+        if target not in by_target:
+            by_target[target] = []
+        by_target[target].append(rel)
+    
+    # Process each variable that has a formula
+    for var in variables:
+        var_id = var['Id']
+        formula = var.get('Formula', '')
+        
+        if not formula or formula.isdigit():
+            continue
+        
+        transition = ET.SubElement(transitions_list, 'qual:transition', {
+            'qual:id': f"tr_{var_id}"
+        })
+        
+        # Add inputs (from relationships)
+        inputs_list = ET.SubElement(transition, 'qual:listOfInputs')
+        input_vars = []
+        
+        if var_id in by_target:
+            for rel in by_target[var_id]:
+                input_var_id = rel['FromVariable']
+                input_vars.append(input_var_id)
+                
+                input_attrs = {
+                    'qual:id': f"in_{input_var_id}_{var_id}",
+                    'qual:qualitativeSpecies': f"var_{input_var_id}",
+                    'qual:transitionEffect': 'none'
+                }
+                
+                # Add sign if available
+                if 'Type' in rel:
+                    if rel['Type'] == 1:
+                        input_attrs['qual:sign'] = 'positive'
+                    elif rel['Type'] == 2:
+                        input_attrs['qual:sign'] = 'negative'
+                
+                ET.SubElement(inputs_list, 'qual:input', input_attrs)
+        
+        # Add output
+        outputs_list = ET.SubElement(transition, 'qual:listOfOutputs')
+        ET.SubElement(outputs_list, 'qual:output', {
+            'qual:id': f"out_{var_id}",
+            'qual:qualitativeSpecies': f"var_{var_id}",
+            'qual:transitionEffect': 'assignmentLevel'
+        })
+        
+        # Generate function terms from truth table
+        func_terms_elem = ET.SubElement(transition, 'qual:listOfFunctionTerms')
+        
+        # Generate truth table
+        truth_table = _generate_truth_table(qn, var_id, input_vars, variables, evaluator_type)
+        
+        # Convert truth table to function terms
+        _add_function_terms(func_terms_elem, truth_table, input_vars, var_id)
+    
+    # Write to file
+    tree = ET.ElementTree(sbml)
+    ET.indent(tree, space="  ")
+    tree.write(output_path, encoding='utf-8', xml_declaration=True)

@@ -12,6 +12,7 @@ from .ltl import testQuery
 from .sbml import (
     load_sbml_qual,
     sbml_to_bma_model,
+    save_bma_to_sbml_qual,
     export_to_sbml_qual,
     validate_sbml_qual,
     get_sbml_info,
@@ -31,6 +32,7 @@ __all__ = [
     'sbml_to_bma_model',
     'export_to_sbml_qual',
     'validate_sbml_qual',
+    'save_bma_to_sbml_qual',
     'get_sbml_info',
     'LIBSBML_AVAILABLE', 
 ]

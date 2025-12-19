@@ -1268,19 +1268,25 @@ def save_bma_to_sbml_qual_libsbml(model_data, output_path):
     model_name = model_data['Model'].get('Name', 'BMA Model')
     variables = model_data['Model']['Variables']
     relationships = model_data['Model']['Relationships']
+    layout_vars = model_data.get('Layout', {}).get('Variables', [])
     
     # Convert to QN for formula evaluation
     qn = model_to_qn(model_data)
     
     sbmlns = libsbml.SBMLNamespaces(3, 1)
     sbmlns.addPkgNamespace("qual", 1)
+    sbmlns.addPkgNamespace("layout", 1)
     
     # Create SBML document
     document = libsbml.SBMLDocument(sbmlns)
     document.setPackageRequired('qual', True)
+    document.setPackageRequired('layout', True)
     model = document.createModel()
     model.setId('model')
     model.setName(model_name)
+    
+    # Enable layout plugin if we have layout info
+    has_layout = len(layout_vars) > 0
     
     # Enable qual plugin
     qual_plugin = model.getPlugin('qual')
@@ -1309,6 +1315,63 @@ def save_bma_to_sbml_qual_libsbml(model_data, output_path):
         
         var_id_to_species[var_id] = species
     
+    # Add layout information if available
+    if has_layout:
+        layout_plugin = model.getPlugin('layout')
+        
+        if layout_plugin is not None:
+            # Create layout
+            layout = layout_plugin.createLayout()
+            layout.setId('__layout__')
+            
+            # Calculate bounding box for layout
+            if layout_vars:
+                max_x = max(lv.get('X', 0) + 50 for lv in layout_vars)  # Add some padding
+                max_y = max(lv.get('Y', 0) + 50 for lv in layout_vars)
+                
+                dimensions = libsbml.Dimensions()
+                dimensions.setWidth(max(max_x, 500))
+                dimensions.setHeight(max(max_y, 500))
+                layout.setDimensions(dimensions)
+
+            else:
+                dimensions = libsbml.Dimensions()
+                dimensions.setWidth(500)
+                dimensions.setHeight(500)
+                layout.setDimensions(dimensions)
+            
+            # Create a map from variable ID to layout info
+            layout_by_id = {lv['Id']: lv for lv in layout_vars}
+            
+            # Add glyphs for each variable
+            for var in variables:
+                var_id = var['Id']
+                
+                if var_id in layout_by_id:
+                    layout_info = layout_by_id[var_id]
+                    
+                    # Create general glyph (since speciesGlyph is for SBML core species)
+                    glyph = layout.createGeneralGlyph()
+                    glyph.setId(f"_ly_var_{var_id}")
+                    glyph.setReferenceId(f"var_{var_id}")
+                    
+                    # Set bounding box
+                    bbox = libsbml.BoundingBox()
+                    bbox.setId(f"_bb_var_{var_id}")
+                    
+                    position = libsbml.Point() # bbox.createPosition()
+                    position.setX(float(layout_info.get('X', layout_info.get("PositionX",0))))
+                    position.setY(float(layout_info.get('Y', layout_info.get("PositionY",0))))
+                    bbox.setPosition(position)
+                    
+                    dimensions = libsbml.Dimensions()
+                    dimensions.setWidth(45.0)  # Default width
+                    dimensions.setHeight(25.0)  # Default height
+                    bbox.setDimensions(dimensions)
+                    
+                    glyph.setBoundingBox(bbox)
+
+
     # Get function evaluator from BMA
     evaluator_type = _assembly.GetType('Evaluate')
     if evaluator_type is None:

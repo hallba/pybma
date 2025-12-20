@@ -2,8 +2,13 @@
 SBML-qual import functionality for PyBMA
 """
 
+import System
+import clr
+
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+from .core import _assembly
 
 # Try to import libsbml
 try:
@@ -1457,7 +1462,8 @@ def _generate_truth_table(qn, target_var_id, input_var_ids, variables, evaluator
     for var in variables:
         var_id = var['Id']
         range_to = var.get('RangeTo', 1)
-        var_ranges[var_id] = list(range(0, range_to + 1))
+        range_from = var.get('RangeFrom', 0)
+        var_ranges[var_id] = list(range(range_from, range_to + 1))
     
     # If no inputs, just evaluate at state 0
     if not input_var_ids:
@@ -1491,15 +1497,149 @@ def _generate_truth_table(qn, target_var_id, input_var_ids, variables, evaluator
                 state[var['Id']] = 0
         
         # Evaluate formula at this state
-        try:
-            output_value = 0# Evalulation function goes here #_evaluate_formula_at_state(qn, target_var_id, state, eval_method)
-            truth_table[input_values] = output_value
-        except Exception as e:
-            # Default to 0 if evaluation fails
-            truth_table[input_values] = 0
+        
+        #Expr.eval_expr v.var range v.f env_0
+        #let rec eval_expr_int (node:var) (range:Map<var,int*int>) (e : expr) (env : Map<var, int>)
+        
+        #try:
+        output_value = _evaluate_formula_at_state(qn, target_var_id, state)
+        truth_table[input_values] = output_value
+        #except Exception as e:
+        
+        # Default to 0 if evaluation fails
+        #    print("Eval fail")
+        #    truth_table[input_values] = 0
     
     return truth_table
+
+def _wrap_bma_call(module_name,function_name,args):
+    module = _assembly.GetType(module_name)
+    function = module.GetMethod(function_name)
     
+    print("######################################")
+    print(module_name + ":" + function_name)
+    params = function.GetParameters()
+
+    for p in params:
+        print(f"{p.Name}: {p.ParameterType.FullName}")
+
+    for arg in args:
+        print(f"{arg} - type: {type(arg)}")
+    
+    result = function.Invoke(None,args)
+    return result
+
+def python_dict_to_fsharp_map(python_dict, key_type=System.Int32, value_type=System.Int32):
+    """
+    Convert Python dict to F# Map.
+    
+    Args:
+        python_dict: Python dictionary
+        key_type: .NET type for keys (default: System.Int32)
+        value_type: .NET type for values (default: System.Int32)
+    
+    Returns:
+        F# Map<key_type, value_type>
+    
+    Examples:
+        # Int to Int map
+        fsharp_map = python_dict_to_fsharp_map({1: 10, 2: 20})
+        
+        # String to Int map
+        fsharp_map = python_dict_to_fsharp_map(
+            {"a": 1, "b": 2}, 
+            System.String, 
+            System.Int32
+        )
+    """
+    from System.Collections.Generic import Dictionary, IEnumerable, KeyValuePair
+    from Microsoft.FSharp.Collections import FSharpMap, MapModule
+    
+    if not python_dict:
+        # Return empty map
+        return MapModule.Empty[key_type, value_type]()
+    
+    # Create list of KeyValuePairs
+    kvp_type = System.Tuple[key_type, value_type]
+    from System.Collections.Generic import List as NetList
+    
+    kvp_list = NetList[kvp_type]()
+    
+    for k, v in python_dict.items():
+        kvp = kvp_type(key_type(k), value_type(v))
+        kvp_list.Add(kvp)
+    
+    # Convert to F# Map using MapModule.ofSeq
+    #fsharp_map = MapModule.OfSeq(kvp_list)
+    
+    # Use MapModule.OfSeq via reflection
+    map_module = System.Type.GetType("Microsoft.FSharp.Collections.MapModule, FSharp.Core")
+    of_seq_method = map_module.GetMethod("OfSeq")
+    
+    # Make it generic for our key and value types
+    generic_of_seq = of_seq_method.MakeGenericMethod(key_type, value_type)
+    
+    # Invoke with the list
+    result = generic_of_seq.Invoke(None, [kvp_list])
+
+    return result
+
+    
+def specialised_dict_to_fsharp_map(python_dict):
+    from Microsoft.FSharp.Collections import MapModule
+    from System import Int32, Tuple
+    """
+    Robust version that handles type conversion explicitly
+    Works with both System types and Python native types
+    """
+    # Build map incrementally using MapModule.Add
+    fsharp_map = MapModule.Empty[Int32, Tuple[Int32, Int32]]()
+    
+    for k, v in python_dict.items():
+        # Convert key to System.Int32 if needed
+        if isinstance(k, int) and not isinstance(k, Int32):
+            sys_key = Int32(k)
+        else:
+            sys_key = k
+        
+        # Convert value to System.Tuple if needed
+        if isinstance(v, tuple) and not isinstance(v, Tuple[Int32, Int32]):
+            if len(v) == 2:
+                sys_value = Tuple[Int32, Int32](Int32(v[0]), Int32(v[1]))
+            else:
+                raise ValueError(f"Value must be a 2-tuple, got {len(v)} items")
+        else:
+            sys_value = v
+        
+        # Add to map (returns new map, maps are immutable)
+        fsharp_map = fsharp_map.Add(sys_key, sys_value)
+    
+    return fsharp_map
+
+def _evaluate_formula_at_state(qn, target_var_id, state, ):
+    #(node:var) (range:Map<var,int*int>) (e : expr) (env : Map<var, int>)
+    
+    stateInt32= {}
+    for key in state.keys():
+        stateInt32[System.Int32(key)] = System.Int32(state[key])
+    
+    env = python_dict_to_fsharp_map(stateInt32)
+    
+    e = None
+    for node in qn:
+        if node.var == System.Int32(target_var_id):
+            e = node.f
+    
+    variableRange = {}
+    for node in qn:
+        variableRange[node.var] = node.range
+    variableRange = specialised_dict_to_fsharp_map(variableRange)
+    
+    args = [ System.Int32(target_var_id), variableRange, e, env ]
+    
+    result = int(_wrap_bma_call("Expr","eval_expr",args))
+    return result
+
 def _add_function_terms_libsbml(transition, truth_table, input_var_ids, target_var_id):
     """
     Add SBML function terms to transition using libsbml.

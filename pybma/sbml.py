@@ -1505,7 +1505,6 @@ def _generate_truth_table(qn, target_var_id, input_var_ids, variables, evaluator
         output_value = _evaluate_formula_at_state(qn, target_var_id, state)
         truth_table[input_values] = output_value
 
-
     return truth_table
 
 def _wrap_bma_call(module_name,function_name,args):
@@ -1629,7 +1628,7 @@ def _evaluate_formula_at_state(qn, target_var_id, state, ):
     variableRange = specialised_dict_to_fsharp_map(variableRange)
     
     args = [ System.Int32(target_var_id), variableRange, e, env ]
-
+    result = int(_wrap_bma_call("Expr","eval_expr_int",args))
     return result
 
 def _add_function_terms_libsbml(transition, truth_table, input_var_ids, target_var_id):
@@ -1649,8 +1648,9 @@ def _add_function_terms_libsbml(transition, truth_table, input_var_ids, target_v
             by_output[output_value] = []
         by_output[output_value].append(input_state)
     
-    # Find most common output (for default)
-    default_output = max(by_output.keys(), key=lambda k: len(by_output[k]))
+    # old- Find most common output (for default)
+    # new- ginsim fails to import non-zero defaults correctly
+    default_output = 0 # max(by_output.keys(), key=lambda k: len(by_output[k]))
     
     # Add default term
     default_term = transition.createDefaultTerm()

@@ -1500,22 +1500,18 @@ def _generate_truth_table(qn, target_var_id, input_var_ids, variables, evaluator
         
         #Expr.eval_expr v.var range v.f env_0
         #let rec eval_expr_int (node:var) (range:Map<var,int*int>) (e : expr) (env : Map<var, int>)
-        
+                
         #try:
         output_value = _evaluate_formula_at_state(qn, target_var_id, state)
         truth_table[input_values] = output_value
-        #except Exception as e:
-        
-        # Default to 0 if evaluation fails
-        #    print("Eval fail")
-        #    truth_table[input_values] = 0
-    
+
+
     return truth_table
 
 def _wrap_bma_call(module_name,function_name,args):
     module = _assembly.GetType(module_name)
     function = module.GetMethod(function_name)
-    
+    '''
     print("######################################")
     print(module_name + ":" + function_name)
     params = function.GetParameters()
@@ -1525,7 +1521,7 @@ def _wrap_bma_call(module_name,function_name,args):
 
     for arg in args:
         print(f"{arg} - type: {type(arg)}")
-    
+    '''
     result = function.Invoke(None,args)
     return result
 
@@ -1624,14 +1620,8 @@ def _evaluate_formula_at_state(qn, target_var_id, state, ):
         stateInt32[System.Int32(key)] = System.Int32(state[key])
     
     env = python_dict_to_fsharp_map(stateInt32)
-    
-    print(qn)
-    
+        
     e = qn[target_var_id].f
-    #for node in qn:
-    #    if node.var == System.Int32(target_var_id):
-    #        print("Found node")
-    #        e = node.f
     
     variableRange = {}
     for node in qn:
@@ -1639,8 +1629,7 @@ def _evaluate_formula_at_state(qn, target_var_id, state, ):
     variableRange = specialised_dict_to_fsharp_map(variableRange)
     
     args = [ System.Int32(target_var_id), variableRange, e, env ]
-    
-    result = int(_wrap_bma_call("Expr","eval_expr_int",args))
+
     return result
 
 def _add_function_terms_libsbml(transition, truth_table, input_var_ids, target_var_id):

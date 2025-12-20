@@ -1625,10 +1625,13 @@ def _evaluate_formula_at_state(qn, target_var_id, state, ):
     
     env = python_dict_to_fsharp_map(stateInt32)
     
-    e = None
-    for node in qn:
-        if node.var == System.Int32(target_var_id):
-            e = node.f
+    print(qn)
+    
+    e = qn[target_var_id].f
+    #for node in qn:
+    #    if node.var == System.Int32(target_var_id):
+    #        print("Found node")
+    #        e = node.f
     
     variableRange = {}
     for node in qn:
@@ -1637,7 +1640,7 @@ def _evaluate_formula_at_state(qn, target_var_id, state, ):
     
     args = [ System.Int32(target_var_id), variableRange, e, env ]
     
-    result = int(_wrap_bma_call("Expr","eval_expr",args))
+    result = int(_wrap_bma_call("Expr","eval_expr_int",args))
     return result
 
 def _add_function_terms_libsbml(transition, truth_table, input_var_ids, target_var_id):

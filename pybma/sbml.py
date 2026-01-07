@@ -1331,12 +1331,16 @@ def save_bma_to_sbml_qual_libsbml(model_data, output_path):
             
             # Calculate bounding box for layout
             if layout_vars:
-                max_x = max(lv.get('X', 0) + 50 for lv in layout_vars)  # Add some padding
-                max_y = max(lv.get('Y', 0) + 50 for lv in layout_vars)
+                # GINSim doesn't have an infinite canvas, so work out the minimum x and y and add them
+                min_x = min(lv.get('PositionX', 0) - 50 for lv in layout_vars)
+                min_y = min(lv.get('PositionY', 0) - 50 for lv in layout_vars)
+                
+                max_x = max(lv.get('PositionX', 0) + 50 for lv in layout_vars)  # Add some padding
+                max_y = max(lv.get('PositionY', 0) + 50 for lv in layout_vars)
                 
                 dimensions = libsbml.Dimensions()
-                dimensions.setWidth(max(max_x, 500))
-                dimensions.setHeight(max(max_y, 500))
+                dimensions.setWidth(max(max_x-min_x, 500))
+                dimensions.setHeight(max(max_y-min_y, 500))
                 layout.setDimensions(dimensions)
 
             else:
@@ -1365,8 +1369,10 @@ def save_bma_to_sbml_qual_libsbml(model_data, output_path):
                     bbox.setId(f"_bb_var_{var_id}")
                     
                     position = libsbml.Point() # bbox.createPosition()
-                    position.setX(float(layout_info.get('X', layout_info.get("PositionX",0))))
-                    position.setY(float(layout_info.get('Y', layout_info.get("PositionY",0))))
+                    modified_x = float(layout_info.get('X', layout_info.get("PositionX",0))) - min_x
+                    modified_y = float(layout_info.get('Y', layout_info.get("PositionY",0))) - min_y
+                    position.setX(modified_x)
+                    position.setY(modified_y)
                     bbox.setPosition(position)
                     
                     dimensions = libsbml.Dimensions()
@@ -1377,14 +1383,6 @@ def save_bma_to_sbml_qual_libsbml(model_data, output_path):
                     glyph.setBoundingBox(bbox)
 
 
-    # Get function evaluator from BMA
-    evaluator_type = _assembly.GetType('Evaluate')
-    if evaluator_type is None:
-        for t in _assembly.GetTypes():
-            if 'eval' in t.Name.lower():
-                evaluator_type = t
-                break
-    
     # Group relationships by target variable
     by_target = {}
     for rel in relationships:
@@ -1399,7 +1397,22 @@ def save_bma_to_sbml_qual_libsbml(model_data, output_path):
         formula = var.get('Formula', '')
         
         if formula.isdigit():
-            continue
+            #this is where we need to add a special transition for constant values
+            if int(formula) == 0:
+                #dont need to do anything if constant zero
+                continue
+            else:
+                # Add a transition with only an output and a default level of int(formula)
+                transition = qual_plugin.createTransition()
+                transition.setId(f"tr_{var_id}")
+                # Add output
+                output_elem = transition.createOutput()
+                output_elem.setId(f"out_{var_id}")
+                output_elem.setQualitativeSpecies(f"var_{var_id}")
+                output_elem.setTransitionEffect(libsbml.OUTPUT_TRANSITION_EFFECT_ASSIGNMENT_LEVEL)
+                # Add default level
+                _add_default_term_libsbml(transition, int(formula))
+                continue
         
         # Create transition
         transition = qual_plugin.createTransition()
@@ -1432,7 +1445,7 @@ def save_bma_to_sbml_qual_libsbml(model_data, output_path):
         output_elem.setTransitionEffect(libsbml.OUTPUT_TRANSITION_EFFECT_ASSIGNMENT_LEVEL)
         
         # Generate truth table
-        truth_table = _generate_truth_table(qn, var_id, input_vars, variables, evaluator_type)
+        truth_table = _generate_truth_table(qn, var_id, input_vars, variables)
         
         # Convert truth table to function terms
         _add_function_terms_libsbml(transition, truth_table, input_vars, var_id)
@@ -1440,7 +1453,7 @@ def save_bma_to_sbml_qual_libsbml(model_data, output_path):
     # Write to file
     libsbml.writeSBMLToFile(document, str(output_path))
 
-def _generate_truth_table(qn, target_var_id, input_var_ids, variables, evaluator_type):
+def _generate_truth_table(qn, target_var_id, input_var_ids, variables):
     """
     Generate truth table for a variable by evaluating its formula.
     
@@ -1473,16 +1486,6 @@ def _generate_truth_table(qn, target_var_id, input_var_ids, variables, evaluator
     input_ranges = [var_ranges[vid] for vid in input_var_ids]
     
     truth_table = {}
-    
-    # Find evaluate method
-    eval_method = None
-    if evaluator_type:
-        for method in evaluator_type.GetMethods():
-            if method.IsPublic and method.IsStatic:
-                # Look for evaluate or similar method
-                if 'eval' in method.Name.lower():
-                    eval_method = method
-                    break
     
     # Generate truth table
     for input_values in itertools.product(*input_ranges):
@@ -1611,6 +1614,12 @@ def specialised_dict_to_fsharp_map(python_dict):
     
     return fsharp_map
 
+def _extract_qn_node(qn,var_id):
+    for node in qn:
+        if node.var == var_id:
+            return node
+    return None
+
 def _evaluate_formula_at_state(qn, target_var_id, state, ):
     #(node:var) (range:Map<var,int*int>) (e : expr) (env : Map<var, int>)
     
@@ -1619,8 +1628,7 @@ def _evaluate_formula_at_state(qn, target_var_id, state, ):
         stateInt32[System.Int32(key)] = System.Int32(state[key])
     
     env = python_dict_to_fsharp_map(stateInt32)
-        
-    e = qn[target_var_id].f
+    e = _extract_qn_node(qn,target_var_id).f
     
     variableRange = {}
     for node in qn:
@@ -1630,6 +1638,11 @@ def _evaluate_formula_at_state(qn, target_var_id, state, ):
     args = [ System.Int32(target_var_id), variableRange, e, env ]
     result = int(_wrap_bma_call("Expr","eval_expr_int",args))
     return result
+
+def _add_default_term_libsbml(transition, default_output):
+    # Add default term
+    default_term = transition.createDefaultTerm()
+    default_term.setResultLevel(default_output)    
 
 def _add_function_terms_libsbml(transition, truth_table, input_var_ids, target_var_id):
     """
@@ -1650,7 +1663,9 @@ def _add_function_terms_libsbml(transition, truth_table, input_var_ids, target_v
     
     # old- Find most common output (for default)
     # new- ginsim fails to import non-zero defaults correctly
+    # this fails to respect constant values; 
     default_output = 0 # max(by_output.keys(), key=lambda k: len(by_output[k]))
+
     
     # Add default term
     default_term = transition.createDefaultTerm()

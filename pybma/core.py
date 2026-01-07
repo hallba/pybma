@@ -60,6 +60,9 @@ def load_model(json_path):
         data = json.load(f)
     return data
 
+def save_model(model, json_path):
+    with open(json_path, "w") as f:
+        json.dump(model,f, ensure_ascii=False, indent=4)
 
 def model_to_qn(model_data):
     """

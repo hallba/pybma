@@ -115,7 +115,7 @@ class BMAModel:
     Wrapper class for BMA models providing a Pythonic interface.
     """
     
-    def __init__(self, json_path):
+    def __init__(self, json_path=None, model=None):
         """
         Initialize BMA model from JSON file.
         
@@ -123,9 +123,25 @@ class BMAModel:
             json_path: Path to BMA JSON file
         """
         self.json_path = json_path
-        self.data = load_model(json_path)
+        if model != None:
+            self.data = model
+        elif json_path != None:
+            self.data = load_model(json_path)
+        else:
+            print("No model or model path given")
+            raise
         self._qn = None
-    
+
+    def __deepcopy__(self, memo):
+        """Create a deep copy of the BMAModel, regenerating qn from model."""
+        import copy
+
+        # Assuming self.model is a plain Python dict/JSON
+        new_model = copy.deepcopy(self.data)
+
+        # Create new instance using the normal constructor
+        return BMAModel(model=new_model)
+
     @property
     def qn(self):
         """Get or create QN representation of the model"""
@@ -146,7 +162,13 @@ class BMAModel:
             variable_index: Index of variable to knock out
             formula: Formula to set (default "0")
         """
-        self.data['Model']['Variables'][variable_index]['Formula'] = formula
+        #work out the internal index
+        true_index = None
+        for i,variable in enumerate(self.data['Model']['Variables']):
+            if variable['Id'] == variable_index:
+                true_index = i
+        
+        self.data['Model']['Variables'][true_index]['Formula'] = formula
         self._qn = None  # Invalidate cached QN
     
     def get_variable(self, index):

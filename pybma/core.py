@@ -40,6 +40,7 @@ from BioModelAnalyzer import Model
 
 Variable = Model.Variable
 Relationship = Model.Relationship
+RelationshipType = Model.RelationshipType
 
 # Get Marshal type
 _marshal_type = _assembly.GetType('Marshal')
@@ -99,6 +100,7 @@ def model_to_qn(model_data):
         rel.Id = rel_data.get('Id')
         rel.FromVariable = rel_data.get('FromVariable')
         rel.ToVariable = rel_data.get('ToVariable')
+        rel.Type = System.Enum.Parse(RelationshipType, rel_data.get('Type'))
         relationships.append(rel)
     
     model.Relationships = System.Array[Relationship](relationships)
